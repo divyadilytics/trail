@@ -1,8 +1,6 @@
-# requirements.txt
-
-streamlit==1.36.0          # Streamlit framework for building the web app
-snowflake-connector-python==3.10.1  # Snowflake connector for Python
-snowflake-snowpark-python==1.18.0  # Snowpark library for Snowflake data operations
-pandas==2.2.2             # Data manipulation and analysis
-plotly==5.22.0            # Interactive visualizations
-requests==2.32.3          # HTTP requests for API calls
+streamlit
+pandas
+requests
+snowflake-connector-python
+snowflake-snowpark-python[pandas]
+plotly
