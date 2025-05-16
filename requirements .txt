@@ -1,6 +1,7 @@
 streamlit>=1.32.0
-snowflake>=0.8.0
-snowflake-snowpark-python>=1.11.0
+streamlit>=1.32.0
+snowflake[snowpark]>=0.8.0
 pandas
+
 
 
