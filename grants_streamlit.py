@@ -6,13 +6,12 @@ import snowflake.connector
 import pandas as pd
 from snowflake.snowpark import Session
 from typing import Any, Dict, List, Optional, Tuple
-import plotly.express as px  # Added for interactive visualizations
+import plotly.express as px
 
 # Snowflake/Cortex Configuration
 HOST = "bnkzyio-ljb86662.snowflakecomputing.com"
 DATABASE = "AI"
 SCHEMA = "DWH_MART"
-# STAGE = "CORTEX_SEARCH"
 API_ENDPOINT = "/api/v2/cortex/agent:run"
 API_TIMEOUT = 50000  # in milliseconds
 CORTEX_SEARCH_SERVICES = "AI.DWH_MART.Grants_search_services"
@@ -35,6 +34,7 @@ if "authenticated" not in st.session_state:
     st.session_state.CONN = None
     st.session_state.snowpark_session = None
     st.session_state.chat_history = []  # Initialize chat history
+    st.session_state.interaction_history = [] # NEW: To store full interaction history
 if "debug_mode" not in st.session_state:
     st.session_state.debug_mode = False
 # Initialize chart selection persistence
@@ -44,7 +44,7 @@ if "chart_y_axis" not in st.session_state:
     st.session_state.chart_y_axis = None
 if "chart_type" not in st.session_state:
     st.session_state.chart_type = "Bar Chart"
-# Initialize query and results persistence
+# Initialize current query and results persistence for main display
 if "current_query" not in st.session_state:
     st.session_state.current_query = None
 if "current_results" not in st.session_state:
@@ -69,6 +69,7 @@ st.markdown("""
 # Function to start a new conversation
 def start_new_conversation():
     st.session_state.chat_history = []
+    st.session_state.interaction_history = [] # NEW: Clear interaction history as well
     st.session_state.current_query = None
     st.session_state.current_results = None
     st.session_state.current_sql = None
@@ -77,6 +78,29 @@ def start_new_conversation():
     st.session_state.chart_y_axis = None
     st.session_state.chart_type = "Bar Chart"
     st.rerun()
+
+# Function to load a specific history item
+def load_history_item(index):
+    item = st.session_state.interaction_history[index]
+    st.session_state.current_query = item["query"]
+    st.session_state.current_sql = item.get("sql")
+    st.session_state.current_results = item.get("results")
+    st.session_state.current_summary = item.get("summary")
+    st.session_state.chart_x_axis = None # Reset chart selection for history view
+    st.session_state.chart_y_axis = None
+    st.session_state.chart_type = "Bar Chart" # Will be overridden in display_chart_tab
+    # Set the chat_history to reflect only this interaction for clarity
+    st.session_state.chat_history = [
+        {"role": "user", "content": item["query"]},
+        {"role": "assistant",
+         "content": item["summary"] if item.get("summary") else item.get("raw_response", "No direct response available."),
+         "sql": item.get("sql"),
+         "results": item.get("results"),
+         "query": item["query"] # Added for chart type inference
+        }
+    ]
+    st.rerun()
+
 
 # Authentication logic
 if not st.session_state.authenticated:
@@ -120,33 +144,6 @@ if not st.session_state.authenticated:
             st.error(f"Authentication failed: {e}")
 else:
     session = st.session_state.snowpark_session
-    
-
-# Assume chat_history is a list of dicts stored in session state:
-# Each dict: {"question": ..., "response": ...}
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-# Button to toggle chat history visibility
-if "show_history" not in st.session_state:
-    st.session_state.show_history = False
-
-if st.button("💬 Show Chat History"):
-    st.session_state.show_history = not st.session_state.show_history
-
-if st.session_state.show_history:
-    st.subheader("📜 Chat History")
-
-    # Display questions as buttons
-    for i, chat in enumerate(reversed(st.session_state.chat_history)):
-        if st.button(f"Q: {chat['question']}", key=f"q_{i}"):
-            st.session_state.selected_response = chat["response"]
-
-    # Show selected response if any
-    if "selected_response" in st.session_state and st.session_state.selected_response:
-        st.markdown("---")
-        st.write(st.session_state.selected_response)
 
     # Utility Functions
     def run_snowflake_query(query):
@@ -157,7 +154,7 @@ if st.session_state.show_history:
             df = session.sql(query)
             data = df.collect()
             if not data:
-                return None
+                return pd.DataFrame() # Return empty DataFrame instead of None for consistent handling
             columns = df.schema.names
             result_df = pd.DataFrame(data, columns=columns)
             return result_df
@@ -250,7 +247,7 @@ if st.session_state.show_history:
                 },
                 timeout=API_TIMEOUT // 1000
             )
-            if st.session_state.debug_mode:  # Show debug info only if toggle is enabled
+            if st.session_state.debug_mode:
                 st.write(f"API Response Status: {resp.status_code}")
                 st.write(f"API Raw Response: {resp.text}")
             if resp.status_code < 400:
@@ -297,7 +294,7 @@ if st.session_state.show_history:
     def display_chart_tab(df: pd.DataFrame, prefix: str = "chart", query: str = ""):
         """Allows user to select chart options and displays a chart with unique widget keys."""
         if df.empty or len(df.columns) < 2:
-            return  # Do not show anything if visualization is not possible
+            return
 
         # Determine default chart type based on query
         query_lower = query.lower()
@@ -311,44 +308,45 @@ if st.session_state.show_history:
         all_cols = list(df.columns)
         col1, col2, col3 = st.columns(3)
 
-        default_x = st.session_state.get(f"{prefix}_x", all_cols[0])
-        try:
-            x_index = all_cols.index(default_x)
-        except ValueError:
-            x_index = 0
-        x_col = col1.selectbox("X axis", all_cols, index=x_index, key=f"{prefix}_x")
+        # Use current session state values for chart selection if available, otherwise use defaults
+        default_x_index = all_cols.index(st.session_state.get(f"{prefix}_x_axis", all_cols[0])) if st.session_state.get(f"{prefix}_x_axis") in all_cols else 0
+        x_col = col1.selectbox("X axis", all_cols, index=default_x_index, key=f"{prefix}_x_axis")
 
         remaining_cols = [c for c in all_cols if c != x_col]
-        default_y = st.session_state.get(f"{prefix}_y", remaining_cols[0])
-        try:
-            y_index = remaining_cols.index(default_y)
-        except ValueError:
-            y_index = 0
-        y_col = col2.selectbox("Y axis", remaining_cols, index=y_index, key=f"{prefix}_y")
+        # Ensure remaining_cols is not empty before accessing its elements
+        if not remaining_cols:
+            st.warning("Not enough columns for a meaningful chart after X-axis selection.")
+            return
+
+        default_y_index = remaining_cols.index(st.session_state.get(f"{prefix}_y_axis", remaining_cols[0])) if st.session_state.get(f"{prefix}_y_axis") in remaining_cols else 0
+        y_col = col2.selectbox("Y axis", remaining_cols, index=default_y_index, key=f"{prefix}_y_axis")
+
 
         chart_options = ["Line Chart", "Bar Chart", "Pie Chart", "Scatter Chart", "Histogram Chart"]
-        default_type = st.session_state.get(f"{prefix}_type", default_chart)
-        try:
-            type_index = chart_options.index(default_type)
-        except ValueError:
-            type_index = chart_options.index(default_chart)
-        chart_type = col3.selectbox("Chart Type", chart_options, index=type_index, key=f"{prefix}_type")
+        default_type_index = chart_options.index(st.session_state.get(f"{prefix}_chart_type", default_chart)) if st.session_state.get(f"{prefix}_chart_type") in chart_options else chart_options.index(default_chart)
+        chart_type = col3.selectbox("Chart Type", chart_options, index=default_type_index, key=f"{prefix}_chart_type")
 
+        # Update session state for persistence
+        st.session_state[f"{prefix}_x_axis"] = x_col
+        st.session_state[f"{prefix}_y_axis"] = y_col
+        st.session_state[f"{prefix}_chart_type"] = chart_type
+
+        # Create the chart
         if chart_type == "Line Chart":
-            fig = px.line(df, x=x_col, y=y_col, title=chart_type)
-            st.plotly_chart(fig, key=f"{prefix}_line")
+            fig = px.line(df, x=x_col, y=y_col, title=f"{y_col} by {x_col}")
+            st.plotly_chart(fig, use_container_width=True)
         elif chart_type == "Bar Chart":
-            fig = px.bar(df, x=x_col, y=y_col, title=chart_type)
-            st.plotly_chart(fig, key=f"{prefix}_bar")
+            fig = px.bar(df, x=x_col, y=y_col, title=f"{y_col} by {x_col}")
+            st.plotly_chart(fig, use_container_width=True)
         elif chart_type == "Pie Chart":
-            fig = px.pie(df, names=x_col, values=y_col, title=chart_type)
-            st.plotly_chart(fig, key=f"{prefix}_pie")
+            fig = px.pie(df, names=x_col, values=y_col, title=f"{y_col} by {x_col}")
+            st.plotly_chart(fig, use_container_width=True)
         elif chart_type == "Scatter Chart":
-            fig = px.scatter(df, x=x_col, y=y_col, title=chart_type)
-            st.plotly_chart(fig, key=f"{prefix}_scatter")
+            fig = px.scatter(df, x=x_col, y=y_col, title=f"{y_col} vs {x_col}")
+            st.plotly_chart(fig, use_container_width=True)
         elif chart_type == "Histogram Chart":
-            fig = px.histogram(df, x=x_col, title=chart_type)
-            st.plotly_chart(fig, key=f"{prefix}_hist")
+            fig = px.histogram(df, x=x_col, title=f"Distribution of {x_col}")
+            st.plotly_chart(fig, use_container_width=True)
 
     # UI Logic
     with st.sidebar:
@@ -364,6 +362,20 @@ if st.session_state.show_history:
             border: none !important;
             padding: 0.5rem 1rem !important;
         }
+        /* Specific style for history buttons to make them look distinct */
+        .stButton button[key^="history_item_"] {
+            background-color: #e0e0e0 !important; /* Lighter grey */
+            color: black !important;
+            font-weight: normal !important;
+            border-radius: 5px !important;
+            margin-bottom: 5px !important;
+            text-align: left !important;
+            padding-left: 10px !important;
+            font-size: 0.9em !important;
+        }
+        .stButton button[key^="history_item_"]:hover {
+            background-color: #d0d0d0 !important;
+        }
         </style>
         """, unsafe_allow_html=True)
 
@@ -371,6 +383,7 @@ if st.session_state.show_history:
         button_container = st.container()
         about_container = st.container()
         help_container = st.container()
+        history_container = st.container() # NEW: Container for history
 
         with logo_container:
             logo_url = "https://www.snowflake.com/wp-content/themes/snowflake/assets/img/logo-blue.svg"
@@ -397,6 +410,18 @@ if st.session_state.show_history:
                 "- [Contact Support](https://www.snowflake.com/en/support/)"
             )
 
+        # NEW: History Section
+        with history_container:
+            st.markdown("### History")
+            if st.session_state.interaction_history:
+                # Display history in reverse order (most recent first)
+                for i, item in reversed(list(enumerate(st.session_state.interaction_history))):
+                    if st.button(item["query"], key=f"history_item_{i}"):
+                        load_history_item(i)
+            else:
+                st.info("No recent questions.")
+
+
     st.title("Cortex AI Assistant for Grants")
 
     # Display the fixed semantic model
@@ -411,20 +436,27 @@ if st.session_state.show_history:
         "What is the total task actual posted by award name?"
     ]
 
-    # Display chat history
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message["role"] == "assistant" and "results" in message and message["results"] is not None:
-                with st.expander("View SQL Query", expanded=False):
-                    st.code(message["sql"], language="sql")
-                st.markdown(f"**Query Results ({len(message['results'])} rows):**")
-                st.dataframe(message["results"])
-                # Only show visualization if it can be rendered
-                if not message["results"].empty and len(message["results"].columns) >= 2:
-                    st.markdown("**📈 Visualization:**")
-                    display_chart_tab(message["results"], prefix=f"chart_{hash(message['content'])}", query=message.get("query", ""))
+    # Display the current interaction (from current_query/results or history load)
+    if st.session_state.current_query:
+        with st.chat_message("user"):
+            st.markdown(st.session_state.current_query)
 
+        with st.chat_message("assistant"):
+            st.markdown(st.session_state.current_summary if st.session_state.current_summary else "No summary available.")
+            if st.session_state.current_sql:
+                with st.expander("View SQL Query", expanded=False):
+                    st.code(st.session_state.current_sql, language="sql")
+            if st.session_state.current_results is not None and not st.session_state.current_results.empty:
+                st.markdown(f"**Query Results ({len(st.session_state.current_results)} rows):**")
+                st.dataframe(st.session_state.current_results)
+                if len(st.session_state.current_results.columns) >= 2:
+                    st.markdown("**📈 Visualization:**")
+                    display_chart_tab(st.session_state.current_results, prefix="current_chart", query=st.session_state.current_query)
+            elif st.session_state.current_results is not None: # Case where results are empty dataframe
+                st.warning("⚠️ No data found for this query.")
+
+
+    # Input for new queries
     query = st.chat_input("Ask your question...")
 
     for sample in sample_questions:
@@ -432,12 +464,17 @@ if st.session_state.show_history:
             query = sample
 
     if query:
-        # Reset chart selections for new query
+        # Clear current display values to show new query results
+        st.session_state.current_query = None
+        st.session_state.current_results = None
+        st.session_state.current_sql = None
+        st.session_state.current_summary = None
         st.session_state.chart_x_axis = None
         st.session_state.chart_y_axis = None
-        st.session_state.chart_type = "Bar Chart"  # Will be overridden in display_chart_tab based on query
+        st.session_state.chart_type = "Bar Chart"
 
-        # Add user query to chat history
+        # Add user query to chat history for immediate display
+        # (This is separate from interaction_history which stores full details)
         st.session_state.chat_history.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
@@ -449,99 +486,117 @@ if st.session_state.show_history:
                 is_summarize = is_summarize_query(query)
                 is_suggestion = is_question_suggestion_query(query)
 
-                assistant_response = {"role": "assistant", "content": "", "query": query}
+                assistant_response_data = {
+                    "query": query,
+                    "summary": None,
+                    "sql": None,
+                    "results": None,
+                    "raw_response": None # For unstructured search results
+                }
+
                 if is_suggestion:
                     response_content = "**Here are some questions you can ask me:**\n"
                     for i, q in enumerate(sample_questions, 1):
                         response_content += f"{i}. {q}\n"
                     response_content += "\nFeel free to ask any of these or come up with your own related to energy savings, Green Residences, or other programs!"
                     st.markdown(response_content)
-                    assistant_response["content"] = response_content
+                    assistant_response_data["summary"] = response_content
 
                 elif is_complete:
                     response = complete(query)
                     if response:
                         response_content = f"**✍️ Generated Response:**\n{response}"
                         st.markdown(response_content)
-                        assistant_response["content"] = response_content
+                        assistant_response_data["summary"] = response_content
+                        assistant_response_data["raw_response"] = response
                     else:
                         response_content = "⚠️ Failed to generate a response."
                         st.warning(response_content)
-                        assistant_response["content"] = response_content
+                        assistant_response_data["summary"] = response_content
 
                 elif is_summarize:
-                    summary = summarize(query)
-                    if summary:
-                        response_content = f"**Summary:**\n{summary}"
+                    summary_text = summarize(query)
+                    if summary_text:
+                        response_content = f"**Summary:**\n{summary_text}"
                         st.markdown(response_content)
-                        assistant_response["content"] = response_content
+                        assistant_response_data["summary"] = response_content
+                        assistant_response_data["raw_response"] = summary_text
                     else:
                         response_content = "⚠️ Failed to generate a summary."
                         st.warning(response_content)
-                        assistant_response["content"] = response_content
+                        assistant_response_data["summary"] = response_content
 
                 elif is_structured:
-                    response = snowflake_api_call(query, is_structured=True)
-                    sql, _ = process_sse_response(response, is_structured=True)
+                    response_sse = snowflake_api_call(query, is_structured=True)
+                    sql, _ = process_sse_response(response_sse, is_structured=True)
+                    assistant_response_data["sql"] = sql
                     if sql:
                         results = run_snowflake_query(sql)
+                        assistant_response_data["results"] = results
                         if results is not None and not results.empty:
-                            # Convert results to string and use complete function for natural language summary
                             results_text = results.to_string(index=False)
                             prompt = f"Provide a concise natural language answer to the query '{query}' using the following data, avoiding phrases like 'Based on the query results':\n\n{results_text}"
-                            summary = complete(prompt)
-                            if not summary:
-                                summary = "⚠️ Unable to generate a natural language summary."
-                            response_content = f"**✍️ Generated Response:**\n{summary}"
+                            summary_nl = complete(prompt)
+                            if not summary_nl:
+                                summary_nl = "⚠️ Unable to generate a natural language summary."
+                            response_content = f"**✍️ Generated Response:**\n{summary_nl}"
                             st.markdown(response_content)
                             with st.expander("View SQL Query", expanded=False):
                                 st.code(sql, language="sql")
                             st.markdown(f"**Query Results ({len(results)} rows):**")
                             st.dataframe(results)
-                            # Only show visualization if it can be rendered
                             if len(results.columns) >= 2:
                                 st.markdown("**📈 Visualization:**")
-                                display_chart_tab(results, prefix=f"chart_{hash(query)}", query=query)
-                            assistant_response.update({
-                                "content": response_content,
-                                "sql": sql,
-                                "results": results,
-                                "summary": summary
-                            })
+                                display_chart_tab(results, prefix="current_chart", query=query)
+                            assistant_response_data["summary"] = summary_nl
                         else:
-                            response_content = "⚠️ No data found."
+                            response_content = "⚠️ No data found for this query."
                             st.warning(response_content)
-                            assistant_response["content"] = response_content
+                            assistant_response_data["summary"] = response_content
                     else:
-                        response_content = "⚠️ No SQL generated."
+                        response_content = "⚠️ No SQL generated for this query."
                         st.warning(response_content)
-                        assistant_response["content"] = response_content
+                        assistant_response_data["summary"] = response_content
 
-                else:
-                    response = snowflake_api_call(query, is_structured=False)
-                    _, search_results = process_sse_response(response, is_structured=False)
+                else: # Unstructured search query
+                    response_sse = snowflake_api_call(query, is_structured=False)
+                    _, search_results = process_sse_response(response_sse, is_structured=False)
                     if search_results:
                         raw_result = search_results[0]
-                        summary = summarize(raw_result)
-                        if summary:
-                            response_content = f"**Here is the Answer:**\n{summary}"
-                            last_sentence = summary.split(".")[-2] if "." in summary else summary
+                        summary_text = summarize(raw_result)
+                        if summary_text:
+                            response_content = f"**Here is the Answer:**\n{summary_text}"
+                            last_sentence = summary_text.split(".")[-2] if "." in summary_text else summary_text
                             st.markdown(response_content)
                             st.success(f" Key Insight: {last_sentence.strip()}")
-                            assistant_response["content"] = response_content
+                            assistant_response_data["summary"] = response_content
+                            assistant_response_data["raw_response"] = summary_text
                         else:
                             response_content = f"**🔍 Key Information (Unsummarized):**\n{summarize_unstructured_answer(raw_result)}"
                             st.markdown(response_content)
-                            assistant_response["content"] = response_content
+                            assistant_response_data["summary"] = response_content
+                            assistant_response_data["raw_response"] = raw_result
                     else:
                         response_content = "⚠️ No relevant search results found."
                         st.warning(response_content)
-                        assistant_response["content"] = response_content
+                        assistant_response_data["summary"] = response_content
 
-                # Add assistant response to chat history
-                st.session_state.chat_history.append(assistant_response)
-                # Update current query and results
+                # Add the complete interaction to the interaction history
+                st.session_state.interaction_history.append(assistant_response_data)
+
+                # Update current display (this will also be used if a history item is clicked)
                 st.session_state.current_query = query
-                st.session_state.current_results = assistant_response.get("results")
-                st.session_state.current_sql = assistant_response.get("sql")
-                st.session_state.current_summary = assistant_response.get("summary")
+                st.session_state.current_sql = assistant_response_data.get("sql")
+                st.session_state.current_results = assistant_response_data.get("results")
+                st.session_state.current_summary = assistant_response_data.get("summary")
+
+                # The chat_history here is only for the live chat message rendering
+                # The full detail is stored in interaction_history
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": assistant_response_data.get("summary") if assistant_response_data.get("summary") else assistant_response_data.get("raw_response", "No direct response available."),
+                    "sql": assistant_response_data.get("sql"),
+                    "results": assistant_response_data.get("results"),
+                    "query": assistant_response_data.get("query") # Pass original query for chart inference
+                })
+                st.rerun() # Rerun to update the main display area with the new content
