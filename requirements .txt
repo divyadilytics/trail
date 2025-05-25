@@ -1,7 +1,7 @@
 streamlit
-snowflake-connector-python==2.9.0 # or a specific version you know works
-snowflake-snowpark-python==1.8.0 # or a specific version you know works
+snowflake-connector-python==2.9.0
+snowflake-snowpark-python==1.8.0
 pandas
 requests
-plotl
+plotly
 
